@@ -13,6 +13,7 @@ import ClassificationCard from '@/components/ClassificationCard';
 import ExplainabilityPanel from '@/components/ExplainabilityPanel';
 import ReportPanel from '@/components/ReportPanel';
 import SampleImagesModal from '@/components/SampleImagesModal';
+import MultiplePredictions from '@/components/MultiplePredictions';
 import { apiService, type PredictionResponse } from '@/services/api';
 
 import fundusImage from '@/assets/fundus_sample.jpg';
@@ -43,6 +44,10 @@ interface PredictionData {
   gradcam?: string;
 }
 
+interface MultiplePredictionData {
+  [imageIndex: number]: PredictionData;
+}
+
 const Upload = () => {
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState(1);
@@ -50,20 +55,21 @@ const Upload = () => {
   const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [predictionData, setPredictionData] = useState<PredictionData | null>(null);
+  const [multiplePredictions, setMultiplePredictions] = useState<MultiplePredictionData>({});
   const [apiError, setApiError] = useState<string | null>(null);
   const [showSampleImages, setShowSampleImages] = useState(false);
   
   // Real validation flag - starts as false, only set true after backend validation
-  const [isFundus, setIsFundus] = useState(false);
+  const [isFundus, setIsFundus] = useState<boolean[]>([]);
   const [isValidating, setIsValidating] = useState(false);
-  const isValid = uploadedImages.length > 0 && uploadedImages.every(() => isFundus);
+  const isValid = uploadedImages.length > 0 && isFundus.length > 0 && isFundus.every(fundus => fundus);
 
   const handleImageUpload = useCallback(async (files: File[], previews: string[]) => {
     setUploadedFiles(files);
     setUploadedImages(previews);
     setCurrentStep(2);
     setIsValidating(true);
-    setIsFundus(false);
+    setIsFundus(new Array(files.length).fill(false));
     setApiError(null);
     
     // Validate each file with backend
@@ -85,15 +91,15 @@ const Upload = () => {
       const allValid = validationResults.every(result => result);
       
       if (allValid) {
-        setIsFundus(true);  // All valid REFUGE images
+        setIsFundus(new Array(files.length).fill(true));  // All valid REFUGE images
         console.log('✅ All images are valid REFUGE images');
       } else {
-        setIsFundus(false); // Some or all invalid images
+        setIsFundus(validationResults); // Some or all invalid images
         setApiError('Some images are invalid retinal fundus images');
         console.log('❌ Invalid images detected');
       }
     } catch (error) {
-      setIsFundus(false);
+      setIsFundus(new Array(files.length).fill(false));
       setApiError('Validation failed');
       console.error('Validation error:', error);
     } finally {
@@ -105,7 +111,7 @@ const Upload = () => {
     setUploadedImages([]);
     setUploadedFiles([]);
     setCurrentStep(1);
-    setIsFundus(false);
+    setIsFundus([]);
     setApiError(null);
     setIsValidating(false);
   }, []);
@@ -134,9 +140,26 @@ const Upload = () => {
       // Wait for all API responses
       const responses: PredictionResponse[] = await Promise.all(predictionPromises);
       
-      // Process the first response for display (you can modify this to handle multiple results)
-      const firstResponse = responses[0];
+      // Process all responses and store them
+      const multipleData: MultiplePredictionData = {};
+      responses.forEach((response, index) => {
+        if (response.validation && response.cdr && response.prediction) {
+          multipleData[index] = {
+            cdr: response.cdr,
+            prediction: {
+              label: response.prediction,
+              prob: response.probability || 0
+            },
+            segmentation: response.segmentation,
+            gradcam: response.gradcam
+          };
+        }
+      });
       
+      setMultiplePredictions(multipleData);
+      
+      // Also set first response for backward compatibility
+      const firstResponse = responses[0];
       if (firstResponse.validation && firstResponse.cdr && firstResponse.prediction) {
         const data: PredictionData = {
           cdr: firstResponse.cdr,
@@ -151,6 +174,7 @@ const Upload = () => {
         
         // Store data for result page
         localStorage.setItem('predictionData', JSON.stringify(data));
+        localStorage.setItem('multiplePredictions', JSON.stringify(multipleData));
         if (uploadedImages.length > 0) {
           localStorage.setItem('uploadedImage', uploadedImages[0]);
         }
@@ -159,7 +183,7 @@ const Upload = () => {
         
         // Check if it's a fundus image validation error
         if (firstResponse.error && firstResponse.error.includes('fundus')) {
-          setIsFundus(false);  // Mark as non-fundus image
+          setIsFundus(new Array(uploadedFiles.length).fill(false));  // Mark as non-fundus image
         }
       }
     } catch (error) {
@@ -174,11 +198,13 @@ const Upload = () => {
     setUploadedImages([]);
     setUploadedFiles([]);
     setCurrentStep(1);
-    setIsFundus(true);
+    setIsFundus([]);
     setIsProcessing(false);
     setPredictionData(null);
+    setMultiplePredictions({});
     setApiError(null);
     localStorage.removeItem('predictionData');
+    localStorage.removeItem('multiplePredictions');
     localStorage.removeItem('uploadedImage');
   }, []);
 
@@ -376,11 +402,20 @@ const Upload = () => {
                 animate={{ opacity: 1, y: 0 }}
               >
                 <h2 className="section-title">6. Classification</h2>
-                <ClassificationCard 
-                  prediction={predictionData?.prediction.label || mockPrediction.label}
-                  probability={predictionData?.prediction.prob || mockPrediction.prob}
-                  model="InceptionV3 + CatBoost (Hybrid Pipeline)"
-                />
+                
+                {/* Show multiple predictions if available */}
+                {Object.keys(multiplePredictions).length > 0 ? (
+                  <MultiplePredictions 
+                    predictions={multiplePredictions} 
+                    uploadedImages={uploadedImages} 
+                  />
+                ) : (
+                  <ClassificationCard 
+                    prediction={predictionData?.prediction.label || mockPrediction.label}
+                    probability={predictionData?.prediction.prob || mockPrediction.prob}
+                    model="InceptionV3 + CatBoost (Hybrid Pipeline)"
+                  />
+                )}
               </motion.section>
             )}
 

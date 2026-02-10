@@ -1,7 +1,7 @@
 import { useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Link, useNavigate } from 'react-router-dom';
-import { Eye, Home, ArrowRight, Play, Loader2 } from 'lucide-react';
+import { Eye, Home, ArrowRight, Play, Loader2, Download, Database, Images } from 'lucide-react';
 
 import Stepper from '@/components/Stepper';
 import UploadBox from '@/components/UploadBox';
@@ -12,6 +12,7 @@ import CDRGauge from '@/components/CDRGauge';
 import ClassificationCard from '@/components/ClassificationCard';
 import ExplainabilityPanel from '@/components/ExplainabilityPanel';
 import ReportPanel from '@/components/ReportPanel';
+import SampleImagesModal from '@/components/SampleImagesModal';
 import { apiService, type PredictionResponse } from '@/services/api';
 
 import fundusImage from '@/assets/fundus_sample.jpg';
@@ -45,44 +46,51 @@ interface PredictionData {
 const Upload = () => {
   const navigate = useNavigate();
   const [currentStep, setCurrentStep] = useState(1);
-  const [uploadedImage, setUploadedImage] = useState<string | null>(null);
-  const [uploadedFile, setUploadedFile] = useState<File | null>(null);
+  const [uploadedImages, setUploadedImages] = useState<string[]>([]);
+  const [uploadedFiles, setUploadedFiles] = useState<File[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
   const [predictionData, setPredictionData] = useState<PredictionData | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [showSampleImages, setShowSampleImages] = useState(false);
   
   // Real validation flag - starts as false, only set true after backend validation
   const [isFundus, setIsFundus] = useState(false);
   const [isValidating, setIsValidating] = useState(false);
-  const isValid = uploadedImage !== null && isFundus;
+  const isValid = uploadedImages.length > 0 && uploadedImages.every(() => isFundus);
 
-  const handleImageUpload = useCallback(async (file: File, preview: string) => {
-    setUploadedFile(file);
-    setUploadedImage(preview);
+  const handleImageUpload = useCallback(async (files: File[], previews: string[]) => {
+    setUploadedFiles(files);
+    setUploadedImages(previews);
     setCurrentStep(2);
     setIsValidating(true);
     setIsFundus(false);
     setApiError(null);
     
-    // Real validation with backend
+    // Validate each file with backend
     try {
-      const formData = new FormData();
-      formData.append('image', file);
-      
-      const response = await fetch('http://localhost:5000/predict', {
-        method: 'POST',
-        body: formData
+      const validationPromises = files.map(async (file) => {
+        const formData = new FormData();
+        formData.append('image', file);
+        
+        const response = await fetch('http://localhost:5000/predict', {
+          method: 'POST',
+          body: formData
+        });
+        
+        const result = await response.json();
+        return result.validation;
       });
       
-      const result = await response.json();
+      const validationResults = await Promise.all(validationPromises);
+      const allValid = validationResults.every(result => result);
       
-      if (result.validation) {
-        setIsFundus(true);  // Valid REFUGE image
-        console.log('✅ Valid REFUGE image detected');
+      if (allValid) {
+        setIsFundus(true);  // All valid REFUGE images
+        console.log('✅ All images are valid REFUGE images');
       } else {
-        setIsFundus(false); // Invalid image
-        setApiError(result.error || 'Invalid image type');
-        console.log('❌ Invalid image detected:', result.error);
+        setIsFundus(false); // Some or all invalid images
+        setApiError('Some images are invalid retinal fundus images');
+        console.log('❌ Invalid images detected');
       }
     } catch (error) {
       setIsFundus(false);
@@ -94,8 +102,8 @@ const Upload = () => {
   }, []);
 
   const handleClearImage = useCallback(() => {
-    setUploadedImage(null);
-    setUploadedFile(null);
+    setUploadedImages([]);
+    setUploadedFiles([]);
     setCurrentStep(1);
     setIsFundus(false);
     setApiError(null);
@@ -103,7 +111,7 @@ const Upload = () => {
   }, []);
 
   const runPipeline = useCallback(async () => {
-    if (!isValid || !uploadedFile) return;
+    if (!isValid || uploadedFiles.length === 0) return;
     
     setIsProcessing(true);
     setApiError(null);
@@ -112,8 +120,10 @@ const Upload = () => {
       // Simulate pipeline steps with delays for better UX
       const stepDelays = [800, 1000, 1200, 800, 1000, 800];
       
-      // Start API call early and show progress
-      const apiPromise = apiService.predictImage(uploadedFile);
+      // Process each image
+      const predictionPromises = uploadedFiles.map(async (file) => {
+        return apiService.predictImage(file);
+      });
       
       // Show progress through steps
       for (let i = 0; i < stepDelays.length; i++) {
@@ -121,31 +131,34 @@ const Upload = () => {
         setCurrentStep(prev => prev + 1);
       }
       
-      // Wait for API response
-      const response: PredictionResponse = await apiPromise;
+      // Wait for all API responses
+      const responses: PredictionResponse[] = await Promise.all(predictionPromises);
       
-      if (response.validation && response.cdr && response.prediction) {
+      // Process the first response for display (you can modify this to handle multiple results)
+      const firstResponse = responses[0];
+      
+      if (firstResponse.validation && firstResponse.cdr && firstResponse.prediction) {
         const data: PredictionData = {
-          cdr: response.cdr,
+          cdr: firstResponse.cdr,
           prediction: {
-            label: response.prediction,
-            prob: response.probability || 0
+            label: firstResponse.prediction,
+            prob: firstResponse.probability || 0
           },
-          segmentation: response.segmentation,
-          gradcam: response.gradcam
+          segmentation: firstResponse.segmentation,
+          gradcam: firstResponse.gradcam
         };
         setPredictionData(data);
         
         // Store data for result page
         localStorage.setItem('predictionData', JSON.stringify(data));
-        if (uploadedImage) {
-          localStorage.setItem('uploadedImage', uploadedImage);
+        if (uploadedImages.length > 0) {
+          localStorage.setItem('uploadedImage', uploadedImages[0]);
         }
       } else {
-        setApiError(response.error || 'Prediction failed');
+        setApiError(firstResponse.error || 'Prediction failed');
         
         // Check if it's a fundus image validation error
-        if (response.error && response.error.includes('fundus')) {
+        if (firstResponse.error && firstResponse.error.includes('fundus')) {
           setIsFundus(false);  // Mark as non-fundus image
         }
       }
@@ -155,11 +168,11 @@ const Upload = () => {
     } finally {
       setIsProcessing(false);
     }
-  }, [isValid, uploadedFile, uploadedImage]);
+  }, [isValid, uploadedFiles, uploadedImages]);
 
   const handleReset = useCallback(() => {
-    setUploadedImage(null);
-    setUploadedFile(null);
+    setUploadedImages([]);
+    setUploadedFiles([]);
     setCurrentStep(1);
     setIsFundus(true);
     setIsProcessing(false);
@@ -171,6 +184,14 @@ const Upload = () => {
 
   const handleViewReport = () => {
     navigate('/result');
+  };
+
+  const handleViewDataset = () => {
+    window.open('https://drive.google.com/drive/folders/1zix_Yx3a8FEV2ZdI5gh0uUnegq5lr0Zt?usp=sharing', '_blank');
+  };
+
+  const handleSampleImages = () => {
+    setShowSampleImages(true);
   };
 
   return (
@@ -188,13 +209,29 @@ const Upload = () => {
                 <p className="text-xs text-muted-foreground">Glaucoma Detection System</p>
               </div>
             </div>
-            <Link 
-              to="/" 
-              className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              <Home className="w-4 h-4" />
-              Home
-            </Link>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={handleViewDataset}
+                className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors px-3 py-2 rounded-lg hover:bg-accent"
+              >
+                <Database className="w-4 h-4" />
+                View Dataset
+              </button>
+              <button
+                onClick={handleSampleImages}
+                className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors px-3 py-2 rounded-lg hover:bg-accent"
+              >
+                <Images className="w-4 h-4" />
+                Sample Images
+              </button>
+              <Link 
+                to="/" 
+                className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors"
+              >
+                <Home className="w-4 h-4" />
+                Home
+              </Link>
+            </div>
           </div>
         </div>
       </header>
@@ -221,14 +258,14 @@ const Upload = () => {
                 <h2 className="section-title">1. Upload Retinal Fundus Image</h2>
                 <UploadBox 
                   onImageUpload={handleImageUpload}
-                  uploadedImage={uploadedImage}
+                  uploadedImages={uploadedImages}
                   onClear={handleClearImage}
                 />
               </motion.section>
             )}
 
             {/* Step 2: Validation */}
-            {currentStep >= 2 && uploadedImage && (
+            {currentStep >= 2 && uploadedImages.length > 0 && (
               <motion.section
                 key="validation"
                 initial={{ opacity: 0, y: 20 }}
@@ -247,7 +284,7 @@ const Upload = () => {
                 )}
                 
                 {/* Validation Result */}
-                {!isValidating && uploadedImage && (
+                {!isValidating && uploadedImages.length > 0 && (
                   <ValidationAlert isValid={isValid} isFundus={isFundus} />
                 )}
                 
@@ -300,7 +337,7 @@ const Upload = () => {
                 animate={{ opacity: 1, y: 0 }}
               >
                 <h2 className="section-title">3. Preprocessing</h2>
-                <PreprocessingPanel originalImage={uploadedImage || fundusImage} />
+                <PreprocessingPanel originalImage={uploadedImages[0] || fundusImage} />
               </motion.section>
             )}
 
@@ -312,7 +349,7 @@ const Upload = () => {
                 animate={{ opacity: 1, y: 0 }}
               >
                 <h2 className="section-title">4. Segmentation (Optic Disc & Cup)</h2>
-                <SegmentationPanel originalImage={uploadedImage || fundusImage} />
+                <SegmentationPanel originalImage={uploadedImages[0] || fundusImage} />
               </motion.section>
             )}
 
@@ -355,7 +392,7 @@ const Upload = () => {
                 animate={{ opacity: 1, y: 0 }}
               >
                 <h2 className="section-title">7. Explainability (Grad-CAM)</h2>
-                <ExplainabilityPanel originalImage={uploadedImage || fundusImage} />
+                <ExplainabilityPanel originalImage={uploadedImages[0] || fundusImage} />
               </motion.section>
             )}
 
@@ -368,7 +405,7 @@ const Upload = () => {
               >
                 <h2 className="section-title">8. Final Report Dashboard</h2>
                 <ReportPanel 
-                  originalImage={uploadedImage || fundusImage}
+                  originalImage={uploadedImages[0] || fundusImage}
                   cdr={predictionData?.cdr || mockCDR}
                   prediction={predictionData?.prediction || mockPrediction}
                   onReset={handleReset}
@@ -378,7 +415,7 @@ const Upload = () => {
           </AnimatePresence>
 
           {/* Quick Demo Button */}
-          {currentStep === 1 && !uploadedImage && (
+          {currentStep === 1 && uploadedImages.length === 0 && (
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -390,7 +427,7 @@ const Upload = () => {
               </p>
               <button
                 onClick={() => {
-                  setUploadedImage(fundusImage);
+                  setUploadedImages([fundusImage]);
                   setCurrentStep(2);
                 }}
                 className="medical-button-outline inline-flex items-center gap-2"
@@ -402,6 +439,12 @@ const Upload = () => {
           )}
         </div>
       </main>
+
+      {/* Sample Images Modal */}
+      <SampleImagesModal 
+        isOpen={showSampleImages} 
+        onClose={() => setShowSampleImages(false)} 
+      />
     </div>
   );
 };
